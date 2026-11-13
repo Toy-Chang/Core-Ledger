@@ -6,7 +6,7 @@
 
 ## 1. Project Overview｜项目概述
 
-CoreLedger 是面向小型商贸企业内部资金管理场景的 Java 后端服务，围绕 **用户 → 角色 → 账户 → 交易流水 → 审计日志** 构建核心业务闭环：
+CoreLedger 是为昆明聚彦祥商贸内部资金管理场景独立开发的 Java 后端服务，围绕 **用户 → 角色 → 账户 → 交易流水 → 审计日志** 构建核心业务闭环：
 
 - 员工注册/登录，通过 JWT 访问接口；普通用户只能操作自己的账户，管理员可查看全部用户、账户和审计日志。
 - 账户支持入账（deposit）和出账（withdraw），每笔变动都生成带有 `balance_before / balance_after` 的交易流水。
@@ -317,7 +317,7 @@ mvn clean test
 
 ### 9.2 本地运行验证（手工，Docker Compose 环境）
 
-根据此前的本地手工验证记录，项目已完成覆盖基础设施、认证授权、交易一致性、幂等及审计等功能的 19 项检查（下表）。这些检查由人工在本地 Docker Compose 环境执行，仓库中没有对应的验证脚本和日志，**不会在每次构建时自动运行**；它们验证的是功能正确性，不是性能基准。
+项目在本地 Docker Compose 环境完成了覆盖基础设施、认证授权、交易一致性、幂等及审计等功能的 19 项手工检查（下表）。这些检查由人工在本地 Docker Compose 环境执行，仓库中没有对应的验证脚本和日志，**不会在每次构建时自动运行**；它们验证的是功能正确性，不是性能基准。
 
 | 分组 | 验证项 |
 | --- | --- |
@@ -326,6 +326,8 @@ mvn clean test
 | 业务功能 | 账户管理、入账/出账、交易流水查询、事务回滚（余额不足时余额不变且无成功流水） |
 | 一致性机制 | Redis 缓存、幂等（相同 `requestId` 不重复改余额/不重复生成流水）、乐观锁（同一账户并发修改时冲突被检测并拒绝） |
 | 可观测与文档 | 审计日志、RequestId + MDC、Swagger/OpenAPI |
+
+**并发验证方法**：对同一账户同时发起多个入账/出账请求，确认冲突请求被拒绝并返回 `409 OPTIMISTIC_LOCK_CONFLICT`，余额不被静默覆盖，且成功笔数 × 金额等于余额变化、流水条数与成功笔数一致。该验证为手工执行，没有保存脚本和日志。
 
 ## 10. Interview Highlights｜面试要点
 
@@ -336,7 +338,7 @@ mvn clean test
 在 `AccountServiceImpl.deposit/withdraw` 这两个 public 方法上，通过 Spring 代理生效；`changeBalance` 是同类内私有方法，由这两个入口调用，处于同一个事务。事务内包含「更新余额 + 插入流水」两条 SQL；Redis 操作不在事务管理范围内，所以代码里用 `try/finally` 手动补偿幂等 key。审计切面在 Controller 层，位于事务外侧。运行时异常默认回滚，本项目的 `BusinessException` 属于运行时异常。
 
 **Q3. 如何防止重复扣款？**
-三层：① 参数校验要求每次请求带 `requestId`；② Redis `SETNX` 以 `accountId + requestId` 为 key 拦截重复提交；③ 数据库 `UNIQUE(account_id, request_id)` 保证同一 `requestId` 不可能产生两条流水，重复写入会使整个事务回滚，余额不会被改两次。
+双层幂等，前置参数校验：参数校验要求每次请求必带 `requestId`；第一层是 Redis `SETNX`，以 `accountId + requestId` 为 key，在进入数据库前拦截重复提交；第二层是数据库 `UNIQUE(account_id, request_id)`，保证同一 `requestId` 不可能产生两条流水，重复写入会使整个事务回滚，余额不会被改两次。
 
 **Q4. Redis SETNX 与数据库唯一约束为什么要组合？**
 Redis 快、能在进入数据库前挡住绝大多数重复请求，但 key 有 TTL、Redis 也可能故障或丢数据，不能当作唯一依据；数据库唯一约束是持久、强一致的最终防线，但只靠它每个重复请求都要走一遍事务并以异常收场，代价更高。组合后：Redis 管效率，数据库管正确性。边界说明：Redis 层的重复返回业务码 3001；Redis 失效后命中数据库唯一约束时，事务会回滚保证余额正确，当前由通用异常处理返回错误响应（可进一步把 `DuplicateKeyException` 映射为 `DUPLICATE_REQUEST`）。
